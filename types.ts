@@ -13,7 +13,7 @@ export interface ChatMessage {
   timestamp: number;
 }
 
-export type SignalType = 'HAND_TOGGLE' | 'KICK_PEER' | 'MUTE_REMOTE_REQ';
+export type SignalType = 'HAND_TOGGLE' | 'KICK_PEER' | 'MUTE_REMOTE_REQ' | 'NAME_UPDATE';
 
 export interface SignalMessage {
   type: SignalType;

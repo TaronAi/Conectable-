@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import Peer, { MediaConnection, DataConnection } from 'peerjs';
 import { 
   Mic, MicOff, Video, VideoOff, PhoneOff, 
-  Copy, Check, Sparkles, Users, Hand, ShieldAlert, BadgeCheck, Home
+  Copy, Check, Sparkles, Users, Hand, ShieldAlert, BadgeCheck, Home, UserCircle
 } from 'lucide-react';
 import { Button } from './Button';
 import { AiAssistant } from './GeminiAssistant';
@@ -13,8 +13,14 @@ interface MeetingRoomProps {
 }
 
 export const MeetingRoom: React.FC<MeetingRoomProps> = ({ roomId: targetRoomId }) => {
-  // State
+  // --- STATE ---
+  // Setup & Identity
+  const [userName, setUserName] = useState<string>('');
+  const [remoteUserName, setRemoteUserName] = useState<string>('Guest');
+  const [isSetupComplete, setIsSetupComplete] = useState(false);
   const [peerId, setPeerId] = useState<string>('');
+  
+  // Call Status
   const [status, setStatus] = useState<CallStatus>(CallStatus.IDLE);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
@@ -29,15 +35,19 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({ roomId: targetRoomId }
   // Advanced Features
   const [isHandRaised, setIsHandRaised] = useState(false);
   const [remoteHandRaised, setRemoteHandRaised] = useState(false);
-  const amIHost = !targetRoomId; // If I didn't join a room ID, I created it.
+  
+  const amIHost = !targetRoomId; 
 
-  // Refs
+  // --- REFS ---
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
+  const previewVideoRef = useRef<HTMLVideoElement>(null); // For setup screen
   const peerInstance = useRef<Peer | null>(null);
   const callRef = useRef<MediaConnection | null>(null);
   const dataConnRef = useRef<DataConnection | null>(null);
+  const localStreamRef = useRef<MediaStream | null>(null);
 
+  // --- MEDIA INITIALIZATION ---
   const initMedia = useCallback(async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
@@ -45,8 +55,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({ roomId: targetRoomId }
         audio: true
       });
       setLocalStream(stream);
-      // Note: We cannot set srcObject here reliably because the video element might not be in the DOM yet.
-      // We rely on the useEffects below to bind the stream to the video element.
+      localStreamRef.current = stream;
       return stream;
     } catch (err) {
       console.error("Failed to get media", err);
@@ -54,52 +63,87 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({ roomId: targetRoomId }
     }
   }, []);
 
-  // Helper: Send data message to peer
-  const sendSignal = (type: SignalMessage['type'], payload?: any) => {
-    if (dataConnRef.current && dataConnRef.current.open) {
-      dataConnRef.current.send({ type, payload } as SignalMessage);
-    }
-  };
-
-  // Clean up media tracks (turns off camera light)
-  const stopLocalStream = () => {
-    if (localStream) {
-      localStream.getTracks().forEach(track => track.stop());
-    }
-  };
-
-  // Effect to attach LOCAL stream to video element when it becomes available
+  // Run media init immediately for preview
   useEffect(() => {
-    if (localVideoRef.current && localStream) {
+    initMedia();
+    return () => stopLocalStream();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Attach stream to PREVIEW video (Setup Screen)
+  useEffect(() => {
+    if (previewVideoRef.current && localStream && !isSetupComplete) {
+      previewVideoRef.current.srcObject = localStream;
+    }
+  }, [localStream, isSetupComplete]);
+
+  // Attach stream to MAIN LOCAL video (Meeting Screen)
+  useEffect(() => {
+    if (localVideoRef.current && localStream && isSetupComplete) {
       localVideoRef.current.srcObject = localStream;
     }
-  }, [localStream, status]); // Run when stream changes OR when status changes (video element mounts)
+  }, [localStream, isSetupComplete, status]);
 
-  // Effect to attach REMOTE stream to video element when it becomes available
+  // Attach stream to REMOTE video
   useEffect(() => {
     if (remoteVideoRef.current && remoteStream) {
       remoteVideoRef.current.srcObject = remoteStream;
     }
   }, [remoteStream, status]);
 
-  useEffect(() => {
-    const initPeer = async () => {
-      const stream = await initMedia();
-      if (!stream) return;
+  // --- SIGNALING & PEER LOGIC ---
+  const sendSignal = (type: SignalMessage['type'], payload?: any) => {
+    if (dataConnRef.current && dataConnRef.current.open) {
+      dataConnRef.current.send({ type, payload } as SignalMessage);
+    }
+  };
 
+  const handleSignal = (data: SignalMessage) => {
+    switch (data.type) {
+      case 'NAME_UPDATE':
+        setRemoteUserName(data.payload);
+        break;
+      case 'HAND_TOGGLE':
+        setRemoteHandRaised(!!data.payload);
+        break;
+      case 'KICK_PEER':
+        setEndReason("You have been removed from the meeting.");
+        endCall(false);
+        break;
+      case 'MUTE_REMOTE_REQ':
+        if (localStreamRef.current) {
+            localStreamRef.current.getAudioTracks().forEach(track => { track.enabled = false; });
+            setIsMuted(true);
+            alert("The host has muted your microphone.");
+        }
+        break;
+      default:
+        break;
+    }
+  };
+
+  // Initialize PeerJS only AFTER setup is complete
+  useEffect(() => {
+    if (!isSetupComplete || !localStream) return;
+
+    const initPeer = async () => {
       const PeerDetails = (await import('peerjs')).default;
       const peer = new PeerDetails();
 
       peer.on('open', (id) => {
         setPeerId(id);
-        setStatus(CallStatus.IDLE);
+        
+        // If Host: We are "Connected" to the room immediately (even if alone)
+        if (amIHost) {
+            setStatus(CallStatus.CONNECTED); 
+        } else {
+            setStatus(CallStatus.CONNECTING);
+        }
 
         // JOINING A ROOM
         if (targetRoomId) {
-          setStatus(CallStatus.CONNECTING);
-          
           // 1. Establish Media Call
-          const call = peer.call(targetRoomId, stream);
+          const call = peer.call(targetRoomId, localStream);
           
           call.on('stream', (remoteStream) => {
             setRemoteStream(remoteStream);
@@ -114,35 +158,45 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({ roomId: targetRoomId }
           call.on('error', () => setStatus(CallStatus.ERROR));
           callRef.current = call;
 
-          // 2. Establish Data Connection for signaling
+          // 2. Establish Data Connection
           const conn = peer.connect(targetRoomId);
           conn.on('open', () => {
             dataConnRef.current = conn;
+            // Send my name immediately upon connection
+            conn.send({ type: 'NAME_UPDATE', payload: userName });
           });
           conn.on('data', (data: any) => handleSignal(data));
-          conn.on('close', () => console.log("Data connection closed"));
         }
       });
 
       // HOSTING A ROOM
-      // 1. Handle incoming media calls
       peer.on('call', (call) => {
-        call.answer(stream);
+        call.answer(localStream);
         setStatus(CallStatus.CONNECTED);
         call.on('stream', (remoteStream) => {
             setRemoteStream(remoteStream);
         });
         call.on('close', () => {
-            setEndReason("The participant left the meeting.");
-            endCall(false);
+            // When peer leaves, we stay in room, but remote stream is gone
+            setRemoteStream(null);
+            setRemoteUserName('Guest');
         });
         callRef.current = call;
       });
 
-      // 2. Handle incoming data connections
       peer.on('connection', (conn) => {
         dataConnRef.current = conn;
-        conn.on('data', (data: any) => handleSignal(data));
+        conn.on('open', () => {
+           // Send my name to the new guest
+           conn.send({ type: 'NAME_UPDATE', payload: userName });
+        });
+        conn.on('data', (data: any) => {
+            handleSignal(data);
+            // If we received a name update, ensure we send ours back if it's the first contact
+            if (data.type === 'NAME_UPDATE') {
+                conn.send({ type: 'NAME_UPDATE', payload: userName });
+            }
+        });
       });
 
       peerInstance.current = peer;
@@ -151,24 +205,26 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({ roomId: targetRoomId }
     initPeer();
 
     return () => {
-      stopLocalStream();
       if (peerInstance.current) peerInstance.current.destroy();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [targetRoomId]); 
+  }, [isSetupComplete]); // Only run once setup is done
 
-  const handleSignal = (data: SignalMessage) => {
-    switch (data.type) {
-      case 'HAND_TOGGLE':
-        setRemoteHandRaised(!!data.payload);
-        break;
-      case 'KICK_PEER':
-        setEndReason("You have been removed from the meeting.");
-        endCall(false);
-        break;
-      default:
-        break;
+  // --- ACTIONS ---
+
+  const joinMeeting = () => {
+    if (!userName.trim()) {
+        alert("Please enter your name");
+        return;
     }
+    setIsSetupComplete(true);
+  };
+
+  const stopLocalStream = () => {
+    if (localStream) {
+      localStream.getTracks().forEach(track => track.stop());
+    }
+    localStreamRef.current = null;
   };
 
   const toggleHand = () => {
@@ -182,10 +238,18 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({ roomId: targetRoomId }
     if (confirm("Are you sure you want to kick this user?")) {
       sendSignal('KICK_PEER');
       setTimeout(() => {
-        setEndReason("You removed the participant.");
-        endCall(false);
+        // Just close the call on our end
+        if (callRef.current) callRef.current.close();
+        if (dataConnRef.current) dataConnRef.current.close();
+        setRemoteStream(null);
+        setRemoteUserName('Guest');
       }, 500);
     }
+  };
+
+  const mutePeer = () => {
+    if (!amIHost) return;
+    sendSignal('MUTE_REMOTE_REQ');
   };
 
   const toggleMute = () => {
@@ -202,7 +266,6 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({ roomId: targetRoomId }
     }
   };
 
-  // Gracefully end the call without crashing/reloading immediately
   const endCall = (notifyPeer = true) => {
     if (notifyPeer && callRef.current) {
         callRef.current.close();
@@ -214,7 +277,6 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({ roomId: targetRoomId }
     setStatus(CallStatus.ENDED);
   };
 
-  // Return to home screen (this essentially resets the app)
   const goHome = () => {
       window.location.hash = '';
       window.location.reload();
@@ -228,11 +290,14 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({ roomId: targetRoomId }
     setTimeout(() => setShowCopied(false), 2000);
   };
 
+  // --- RENDER HELPERS ---
+
   const renderVideoContainer = (
     ref: React.RefObject<HTMLVideoElement | null>, 
     isLocal: boolean, 
     stream: MediaStream | null,
-    handRaised: boolean
+    handRaised: boolean,
+    displayName: string
   ) => {
     const showPlaceholder = !stream || (isLocal && isVideoOff);
     
@@ -245,22 +310,22 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({ roomId: targetRoomId }
           ref={ref} 
           autoPlay 
           playsInline 
-          muted={isLocal} // Always mute local video to prevent echo
+          muted={isLocal} 
           className={`w-full h-full object-cover ${isLocal ? 'mirror' : ''} ${showPlaceholder ? 'opacity-0' : 'opacity-100'}`}
         />
         
         {/* Placeholder / Fallback */}
         {showPlaceholder && (
           <div className="absolute inset-0 flex items-center justify-center bg-gray-800">
-            <div className="w-20 h-20 rounded-full bg-gray-700 flex items-center justify-center">
-              <span className="text-2xl font-bold text-gray-500">{isLocal ? 'You' : '...'}</span>
+            <div className="w-24 h-24 rounded-full bg-gray-700 flex items-center justify-center">
+              <span className="text-3xl font-bold text-gray-500 uppercase">{displayName.charAt(0)}</span>
             </div>
           </div>
         )}
 
         {/* Name Tag */}
         <div className="absolute bottom-4 left-4 bg-black/40 backdrop-blur-md px-3 py-1.5 rounded-lg text-white text-sm font-medium border border-white/10 flex items-center gap-2">
-           {isLocal ? 'You' : 'Remote Guest'}
+           {displayName} {isLocal && '(You)'}
            {isLocal && amIHost && <BadgeCheck className="w-4 h-4 text-blue-400" />}
            {/* Mute Indicator */}
            {isLocal && isMuted && <MicOff className="w-3 h-3 text-red-500" />}
@@ -276,6 +341,73 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({ roomId: targetRoomId }
     );
   };
 
+  // --- VIEW: NAME SETUP SCREEN ---
+  if (!isSetupComplete && status !== CallStatus.ENDED) {
+      return (
+        <div className="h-screen w-full bg-gray-950 flex items-center justify-center p-4">
+             <div className="max-w-4xl w-full flex flex-col md:flex-row gap-8 items-center justify-center">
+                 
+                 {/* Preview Video */}
+                 <div className="relative w-full max-w-md aspect-video bg-gray-900 rounded-2xl overflow-hidden border border-gray-800 shadow-2xl">
+                    <video 
+                        ref={previewVideoRef}
+                        autoPlay
+                        playsInline
+                        muted
+                        className={`w-full h-full object-cover mirror ${isVideoOff ? 'opacity-0' : 'opacity-100'}`}
+                    />
+                    {isVideoOff && (
+                        <div className="absolute inset-0 flex items-center justify-center text-gray-500">
+                            Camera Off
+                        </div>
+                    )}
+                    <div className="absolute bottom-4 left-1/2 transform -translate-x-1/2 flex items-center gap-3 bg-gray-900/60 backdrop-blur p-2 rounded-xl border border-gray-700">
+                        <Button variant="icon" size="sm" onClick={toggleMute} active={!isMuted}>
+                            {isMuted ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+                        </Button>
+                        <Button variant="icon" size="sm" onClick={toggleVideo} active={!isVideoOff}>
+                             {isVideoOff ? <VideoOff className="w-4 h-4" /> : <Video className="w-4 h-4" />}
+                        </Button>
+                    </div>
+                 </div>
+
+                 {/* Setup Form */}
+                 <div className="w-full max-w-sm space-y-6">
+                    <div>
+                        <h1 className="text-3xl font-bold text-white mb-2">Get Ready</h1>
+                        <p className="text-gray-400">Check your audio and video before joining.</p>
+                    </div>
+
+                    <div className="space-y-4">
+                        <div>
+                            <label className="block text-sm font-medium text-gray-400 mb-1">Display Name</label>
+                            <div className="relative">
+                                <UserCircle className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-500 w-5 h-5" />
+                                <input 
+                                    type="text" 
+                                    value={userName}
+                                    onChange={(e) => setUserName(e.target.value)}
+                                    placeholder="Enter your name"
+                                    className="w-full bg-gray-900 border border-gray-700 rounded-xl py-3 pl-10 pr-4 text-white placeholder-gray-600 focus:outline-none focus:ring-2 focus:ring-brand-500"
+                                />
+                            </div>
+                        </div>
+
+                        <Button 
+                            className="w-full py-4 text-lg font-semibold" 
+                            onClick={joinMeeting}
+                            disabled={!userName.trim()}
+                        >
+                            {targetRoomId ? "Join Meeting" : "Start Meeting"}
+                        </Button>
+                    </div>
+                 </div>
+             </div>
+        </div>
+      )
+  }
+
+  // --- VIEW: MEETING ROOM ---
   return (
     <div className="relative h-screen w-full bg-gray-950 flex flex-col overflow-hidden">
       
@@ -286,10 +418,21 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({ roomId: targetRoomId }
             <span className="font-semibold text-gray-200 hidden md:inline">Connectable</span>
         </div>
         
+        {/* Show room ID for Host even if no one connected yet */}
+        {amIHost && status === CallStatus.CONNECTED && (
+             <div className="flex items-center gap-2 bg-gray-900/50 backdrop-blur rounded-full border border-gray-800 px-3 py-1.5 hover:border-brand-500/50 transition-colors">
+                <Users className="w-4 h-4 text-gray-400" />
+                <span className="text-sm text-gray-300 max-w-[150px] truncate">{window.location.href}</span>
+                <button onClick={copyLink} className="p-1 hover:text-white text-gray-400">
+                    {showCopied ? <Check className="w-3 h-3 text-green-400" /> : <Copy className="w-3 h-3" />}
+                </button>
+             </div>
+        )}
+
         {status === CallStatus.CONNECTED && (
           <div className="flex items-center gap-2 px-4 py-2 bg-gray-900/50 backdrop-blur rounded-full border border-gray-800">
-             <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
-             <span className="text-sm text-gray-300">Live</span> 
+             <div className={`w-2 h-2 rounded-full ${remoteStream ? 'bg-green-500 animate-pulse' : 'bg-yellow-500'}`}></div>
+             <span className="text-sm text-gray-300">{remoteStream ? 'Live' : 'Waiting for others'}</span> 
           </div>
         )}
       </div>
@@ -298,42 +441,20 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({ roomId: targetRoomId }
       <div className="flex-1 p-4 md:p-8 flex items-center justify-center transition-all duration-300">
         <div className={`w-full max-w-7xl h-full flex flex-col md:flex-row gap-4 items-center justify-center ${showAiPanel ? 'mr-96' : ''}`}>
            
-           {/* NON-CONNECTED STATES (Lobby, Connecting, Ended, Error) */}
-           {status !== CallStatus.CONNECTED && (
-             <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-gray-950 text-center p-4">
-                
-                {status === CallStatus.IDLE && !targetRoomId && (
-                   <div className="max-w-md w-full bg-gray-900 p-8 rounded-3xl border border-gray-800 shadow-2xl">
-                      <div className="w-16 h-16 bg-brand-900/30 rounded-2xl flex items-center justify-center mx-auto mb-6">
-                         <Users className="w-8 h-8 text-brand-500" />
-                      </div>
-                      <h2 className="text-2xl font-bold text-white mb-2">Ready to join?</h2>
-                      <p className="text-gray-400 mb-8">Share this link to invite someone to this room.</p>
-                      
-                      <div className="flex items-center gap-2 bg-gray-950 p-3 rounded-xl border border-gray-800 mb-6 group hover:border-brand-500/50 transition-colors">
-                         <div className="p-2 bg-gray-800 rounded-lg">
-                           <Sparkles className="w-4 h-4 text-gray-400" />
-                         </div>
-                         <code className="flex-1 text-sm text-gray-300 font-mono truncate text-left">
-                            {window.location.href}
-                         </code>
-                         <Button variant="ghost" size="sm" onClick={copyLink}>
-                            {showCopied ? <Check className="w-4 h-4 text-green-400" /> : <Copy className="w-4 h-4" />}
-                         </Button>
-                      </div>
-                      <div className="text-sm text-gray-500">Waiting for others to join...</div>
-                   </div>
-                )}
-
-                {status === CallStatus.CONNECTING && (
-                    <div className="flex flex-col items-center">
+           {/* NON-CONNECTED STATES (Connecting, Ended, Error) */}
+           {/* Note: Host goes straight to CONNECTED. Guest might see CONNECTING. */}
+           {status === CallStatus.CONNECTING && (
+                <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-gray-950 text-center p-4">
+                   <div className="flex flex-col items-center">
                        <div className="w-16 h-16 border-4 border-brand-500 border-t-transparent rounded-full animate-spin mb-6"></div>
                        <h3 className="text-xl font-medium">Connecting to room...</h3>
                     </div>
-                )}
+                </div>
+           )}
 
-                {/* ENDED SCREEN */}
-                {status === CallStatus.ENDED && (
+           {/* ENDED SCREEN */}
+           {status === CallStatus.ENDED && (
+                <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-gray-950 text-center p-4">
                     <div className="max-w-md w-full bg-gray-900 p-8 rounded-3xl border border-gray-800 shadow-2xl flex flex-col items-center animate-in fade-in zoom-in duration-300">
                         <div className="w-16 h-16 bg-gray-800 rounded-full flex items-center justify-center mb-6">
                             <PhoneOff className="w-8 h-8 text-gray-400" />
@@ -344,26 +465,45 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({ roomId: targetRoomId }
                            <Home className="w-4 h-4" /> Return to Home
                         </Button>
                     </div>
-                )}
+                </div>
+           )}
 
-                {/* ERROR SCREEN */}
-                {status === CallStatus.ERROR && (
+           {/* ERROR SCREEN */}
+           {status === CallStatus.ERROR && (
+               <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-gray-950 text-center p-4">
                    <div className="max-w-md w-full bg-gray-900 p-8 rounded-3xl border border-gray-800 shadow-2xl flex flex-col items-center">
                        <h2 className="text-xl font-bold text-red-400 mb-4">Connection Error</h2>
                        <p className="text-gray-400 mb-6">Could not connect to the room.</p>
                        <Button onClick={goHome}>Try Again</Button>
                    </div>
-                )}
-             </div>
+               </div>
            )}
 
            {/* ACTIVE CALL LAYOUT (SPLIT or GRID) */}
-           {status === CallStatus.CONNECTED && (
-             <div className="flex flex-col md:grid md:grid-cols-2 gap-4 w-full h-full max-h-[80vh]">
-                 {/* Remote Video */}
-                 {renderVideoContainer(remoteVideoRef, false, remoteStream, remoteHandRaised)}
-                 {/* Local Video */}
-                 {renderVideoContainer(localVideoRef, true, localStream, isHandRaised)}
+           {/* Show this if Connected OR if (I am Host and everything is setup, even if waiting) */}
+           {(status === CallStatus.CONNECTED) && (
+             <div className={`flex flex-col gap-4 w-full h-full max-h-[80vh] ${remoteStream ? 'md:grid md:grid-cols-2' : 'flex items-center justify-center'}`}>
+                 {/* Remote Video - Only show if exists */}
+                 {remoteStream ? (
+                    renderVideoContainer(remoteVideoRef, false, remoteStream, remoteHandRaised, remoteUserName)
+                 ) : (
+                    // Empty state waiting for guest (only visible to host)
+                    <div className="hidden md:flex flex-1 w-full h-full rounded-2xl border-2 border-dashed border-gray-800 items-center justify-center flex-col gap-4 bg-gray-900/20">
+                        <div className="w-16 h-16 bg-gray-800 rounded-full flex items-center justify-center animate-pulse">
+                            <Users className="w-8 h-8 text-gray-500" />
+                        </div>
+                        <p className="text-gray-500 font-medium">Waiting for others to join...</p>
+                        <Button variant="secondary" size="sm" onClick={copyLink} className="gap-2">
+                            {showCopied ? <Check className="w-4 h-4" /> : <Copy className="w-4 h-4" />}
+                            Copy Invite Link
+                        </Button>
+                    </div>
+                 )}
+                 
+                 {/* Local Video - Always show */}
+                 <div className={`${!remoteStream ? 'w-full max-w-2xl aspect-video h-auto' : 'w-full h-full'}`}>
+                    {renderVideoContainer(localVideoRef, true, localStream, isHandRaised, userName)}
+                 </div>
              </div>
            )}
         </div>
@@ -393,9 +533,14 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({ roomId: targetRoomId }
               </Button>
 
               {amIHost && status === CallStatus.CONNECTED && (
+                <>
+                  <Button variant="icon" size="icon" onClick={mutePeer} className="text-orange-400 hover:text-orange-300 hover:bg-orange-900/20" title="Mute Participant (Admin)">
+                     <MicOff className="w-5 h-5" />
+                  </Button>
                   <Button variant="icon" size="icon" onClick={kickPeer} className="text-red-400 hover:text-red-300 hover:bg-red-900/20" title="Kick Participant (Admin)">
                      <ShieldAlert className="w-5 h-5" />
                   </Button>
+                </>
               )}
            </div>
 
