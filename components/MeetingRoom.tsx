@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import Peer, { MediaConnection, DataConnection } from 'peerjs';
 import { 
   Mic, MicOff, Video, VideoOff, PhoneOff, 
-  Copy, Check, Sparkles, Users, Hand, ShieldAlert, BadgeCheck, Home, UserCircle
+  Copy, Check, Sparkles, Users, Hand, ShieldAlert, BadgeCheck, Home, UserCircle, MoreVertical
 } from 'lucide-react';
 import { Button } from './Button';
 import { AiAssistant } from './GeminiAssistant';
@@ -31,6 +31,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({ roomId: targetRoomId }
   const [isVideoOff, setIsVideoOff] = useState(false);
   const [showCopied, setShowCopied] = useState(false);
   const [showAiPanel, setShowAiPanel] = useState(false);
+  const [remoteMenuOpen, setRemoteMenuOpen] = useState(false);
   
   // Advanced Features
   const [isHandRaised, setIsHandRaised] = useState(false);
@@ -324,18 +325,57 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({ roomId: targetRoomId }
         )}
 
         {/* Name Tag */}
-        <div className="absolute bottom-4 left-4 bg-black/40 backdrop-blur-md px-3 py-1.5 rounded-lg text-white text-sm font-medium border border-white/10 flex items-center gap-2">
+        <div className="absolute bottom-4 left-4 bg-black/40 backdrop-blur-md px-3 py-1.5 rounded-lg text-white text-sm font-medium border border-white/10 flex items-center gap-2 z-10">
            {displayName} {isLocal && '(You)'}
            {isLocal && amIHost && <BadgeCheck className="w-4 h-4 text-blue-400" />}
            {/* Mute Indicator */}
            {isLocal && isMuted && <MicOff className="w-3 h-3 text-red-500" />}
         </div>
 
-        {/* Hand Raise Overlay */}
+        {/* Hand Raise Overlay - Moved to top-left */}
         {handRaised && (
-           <div className="absolute top-4 right-4 bg-brand-500 text-white p-2 rounded-full shadow-lg animate-bounce-small">
+           <div className="absolute top-4 left-4 bg-brand-500 text-white p-2 rounded-full shadow-lg animate-bounce-small z-10">
               <Hand className="w-5 h-5" />
            </div>
+        )}
+
+        {/* Admin Menu - Only on Remote Video for Host */}
+        {!isLocal && amIHost && (
+          <div className="absolute top-4 right-4 z-20">
+            <Button 
+              variant="icon" 
+              size="icon" 
+              onClick={(e) => { e.stopPropagation(); setRemoteMenuOpen(!remoteMenuOpen); }}
+              className="bg-black/40 border-white/10 hover:bg-black/60 text-white rounded-full w-10 h-10 p-0 backdrop-blur-sm"
+            >
+              <MoreVertical className="w-5 h-5" />
+            </Button>
+            
+            {/* Menu Dropdown */}
+            {remoteMenuOpen && (
+              <>
+                <div 
+                    className="fixed inset-0 z-30" 
+                    onClick={() => setRemoteMenuOpen(false)} 
+                />
+                <div className="absolute right-0 top-full mt-2 w-48 bg-gray-900/95 backdrop-blur-xl border border-gray-700 rounded-xl shadow-2xl overflow-hidden flex flex-col p-1 animate-in fade-in zoom-in-95 duration-200 z-40">
+                    <button 
+                    onClick={() => { mutePeer(); setRemoteMenuOpen(false); }}
+                    className="flex items-center gap-3 w-full px-3 py-2.5 text-sm text-gray-200 hover:text-white hover:bg-white/10 rounded-lg transition-colors text-left"
+                    >
+                    <MicOff className="w-4 h-4 text-orange-400" /> Mute User
+                    </button>
+                    <div className="h-px bg-gray-700/50 my-1 mx-2"></div>
+                    <button 
+                    onClick={() => { kickPeer(); setRemoteMenuOpen(false); }}
+                    className="flex items-center gap-3 w-full px-3 py-2.5 text-sm text-red-400 hover:text-red-300 hover:bg-red-500/10 rounded-lg transition-colors text-left"
+                    >
+                    <ShieldAlert className="w-4 h-4" /> Kick User
+                    </button>
+                </div>
+              </>
+            )}
+          </div>
         )}
       </div>
     );
@@ -531,17 +571,6 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({ roomId: targetRoomId }
               <Button variant="icon" size="icon" onClick={() => setShowAiPanel(!showAiPanel)} active={showAiPanel} className={showAiPanel ? 'bg-brand-600 text-white border-brand-500' : 'text-brand-400'} title="AI Assistant">
                  <Sparkles className="w-5 h-5" />
               </Button>
-
-              {amIHost && status === CallStatus.CONNECTED && (
-                <>
-                  <Button variant="icon" size="icon" onClick={mutePeer} className="text-orange-400 hover:text-orange-300 hover:bg-orange-900/20" title="Mute Participant (Admin)">
-                     <MicOff className="w-5 h-5" />
-                  </Button>
-                  <Button variant="icon" size="icon" onClick={kickPeer} className="text-red-400 hover:text-red-300 hover:bg-red-900/20" title="Kick Participant (Admin)">
-                     <ShieldAlert className="w-5 h-5" />
-                  </Button>
-                </>
-              )}
            </div>
 
            <div className="w-px h-8 bg-gray-700/50"></div>
