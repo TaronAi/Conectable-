@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState, useCallback } from 'react';
 import Peer, { MediaConnection, DataConnection } from 'peerjs';
 import { 
   Mic, MicOff, Video, VideoOff, PhoneOff, 
-  Copy, Check, Sparkles, Users, Hand, ShieldAlert, BadgeCheck
+  Copy, Check, Sparkles, Users, Hand, ShieldAlert, BadgeCheck, Home
 } from 'lucide-react';
 import { Button } from './Button';
 import { AiAssistant } from './GeminiAssistant';
@@ -18,6 +18,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({ roomId: targetRoomId }
   const [status, setStatus] = useState<CallStatus>(CallStatus.IDLE);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
+  const [endReason, setEndReason] = useState<string | null>(null);
   
   // Controls
   const [isMuted, setIsMuted] = useState(false);
@@ -61,6 +62,13 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({ roomId: targetRoomId }
     }
   };
 
+  // Clean up media tracks (turns off camera light)
+  const stopLocalStream = () => {
+    if (localStream) {
+      localStream.getTracks().forEach(track => track.stop());
+    }
+  };
+
   useEffect(() => {
     const initPeer = async () => {
       const stream = await initMedia();
@@ -86,7 +94,11 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({ roomId: targetRoomId }
             if (remoteVideoRef.current) remoteVideoRef.current.srcObject = remoteStream;
           });
 
-          call.on('close', () => endCall());
+          call.on('close', () => {
+             setEndReason("The host ended the meeting.");
+             endCall(false);
+          });
+          
           call.on('error', () => setStatus(CallStatus.ERROR));
           callRef.current = call;
 
@@ -109,6 +121,10 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({ roomId: targetRoomId }
             setRemoteStream(remoteStream);
             if (remoteVideoRef.current) remoteVideoRef.current.srcObject = remoteStream;
         });
+        call.on('close', () => {
+            setEndReason("The participant left the meeting.");
+            endCall(false);
+        });
         callRef.current = call;
       });
 
@@ -124,7 +140,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({ roomId: targetRoomId }
     initPeer();
 
     return () => {
-      if (localStream) localStream.getTracks().forEach(track => track.stop());
+      stopLocalStream();
       if (peerInstance.current) peerInstance.current.destroy();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -136,8 +152,8 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({ roomId: targetRoomId }
         setRemoteHandRaised(!!data.payload);
         break;
       case 'KICK_PEER':
-        alert("The host has removed you from the meeting.");
-        endCall();
+        setEndReason("You have been removed from the meeting.");
+        endCall(false);
         break;
       default:
         break;
@@ -155,10 +171,8 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({ roomId: targetRoomId }
     if (confirm("Are you sure you want to kick this user?")) {
       sendSignal('KICK_PEER');
       setTimeout(() => {
-        if (callRef.current) callRef.current.close();
-        if (dataConnRef.current) dataConnRef.current.close();
-        setStatus(CallStatus.ENDED);
-        setRemoteStream(null);
+        setEndReason("You removed the participant.");
+        endCall(false);
       }, 500);
     }
   };
@@ -177,11 +191,22 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({ roomId: targetRoomId }
     }
   };
 
-  const endCall = () => {
-    if (callRef.current) callRef.current.close();
-    if (dataConnRef.current) dataConnRef.current.close();
-    window.location.hash = '';
-    window.location.reload();
+  // Gracefully end the call without crashing/reloading immediately
+  const endCall = (notifyPeer = true) => {
+    if (notifyPeer && callRef.current) {
+        callRef.current.close();
+    }
+    if (dataConnRef.current) {
+        dataConnRef.current.close();
+    }
+    stopLocalStream();
+    setStatus(CallStatus.ENDED);
+  };
+
+  // Return to home screen (this essentially resets the app)
+  const goHome = () => {
+      window.location.hash = '';
+      window.location.reload();
   };
 
   const copyLink = () => {
@@ -252,7 +277,7 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({ roomId: targetRoomId }
         {status === CallStatus.CONNECTED && (
           <div className="flex items-center gap-2 px-4 py-2 bg-gray-900/50 backdrop-blur rounded-full border border-gray-800">
              <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></div>
-             <span className="text-sm text-gray-300">00:00</span> 
+             <span className="text-sm text-gray-300">Live</span> 
           </div>
         )}
       </div>
@@ -261,9 +286,10 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({ roomId: targetRoomId }
       <div className="flex-1 p-4 md:p-8 flex items-center justify-center transition-all duration-300">
         <div className={`w-full max-w-7xl h-full flex flex-col md:flex-row gap-4 items-center justify-center ${showAiPanel ? 'mr-96' : ''}`}>
            
-           {/* WAITING ROOM STATE */}
+           {/* NON-CONNECTED STATES (Lobby, Connecting, Ended, Error) */}
            {status !== CallStatus.CONNECTED && (
              <div className="absolute inset-0 z-20 flex flex-col items-center justify-center bg-gray-950 text-center p-4">
+                
                 {status === CallStatus.IDLE && !targetRoomId && (
                    <div className="max-w-md w-full bg-gray-900 p-8 rounded-3xl border border-gray-800 shadow-2xl">
                       <div className="w-16 h-16 bg-brand-900/30 rounded-2xl flex items-center justify-center mx-auto mb-6">
@@ -286,11 +312,35 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({ roomId: targetRoomId }
                       <div className="text-sm text-gray-500">Waiting for others to join...</div>
                    </div>
                 )}
+
                 {status === CallStatus.CONNECTING && (
                     <div className="flex flex-col items-center">
                        <div className="w-16 h-16 border-4 border-brand-500 border-t-transparent rounded-full animate-spin mb-6"></div>
                        <h3 className="text-xl font-medium">Connecting to room...</h3>
                     </div>
+                )}
+
+                {/* ENDED SCREEN */}
+                {status === CallStatus.ENDED && (
+                    <div className="max-w-md w-full bg-gray-900 p-8 rounded-3xl border border-gray-800 shadow-2xl flex flex-col items-center animate-in fade-in zoom-in duration-300">
+                        <div className="w-16 h-16 bg-gray-800 rounded-full flex items-center justify-center mb-6">
+                            <PhoneOff className="w-8 h-8 text-gray-400" />
+                        </div>
+                        <h2 className="text-2xl font-bold text-white mb-2">Meeting Ended</h2>
+                        <p className="text-gray-400 mb-8">{endReason || "You have left the call."}</p>
+                        <Button onClick={goHome} className="flex items-center gap-2">
+                           <Home className="w-4 h-4" /> Return to Home
+                        </Button>
+                    </div>
+                )}
+
+                {/* ERROR SCREEN */}
+                {status === CallStatus.ERROR && (
+                   <div className="max-w-md w-full bg-gray-900 p-8 rounded-3xl border border-gray-800 shadow-2xl flex flex-col items-center">
+                       <h2 className="text-xl font-bold text-red-400 mb-4">Connection Error</h2>
+                       <p className="text-gray-400 mb-6">Could not connect to the room.</p>
+                       <Button onClick={goHome}>Try Again</Button>
+                   </div>
                 )}
              </div>
            )}
@@ -307,41 +357,43 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({ roomId: targetRoomId }
         </div>
       </div>
 
-      {/* Control Bar */}
-      <div className="absolute bottom-8 left-1/2 transform -translate-x-1/2 flex items-center gap-3 bg-gray-900/80 backdrop-blur-xl p-2.5 rounded-2xl border border-gray-800 shadow-2xl z-50">
-         <div className="flex items-center gap-2 px-2">
-            <Button variant="icon" size="icon" onClick={toggleMute} active={!isMuted} className={isMuted ? 'bg-red-500/10 text-red-500 border-red-500/20' : ''}>
-                {isMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
-            </Button>
-            <Button variant="icon" size="icon" onClick={toggleVideo} active={!isVideoOff} className={isVideoOff ? 'bg-red-500/10 text-red-500 border-red-500/20' : ''}>
-                {isVideoOff ? <VideoOff className="w-5 h-5" /> : <Video className="w-5 h-5" />}
-            </Button>
-         </div>
+      {/* Control Bar - Only show when CONNECTED */}
+      {status === CallStatus.CONNECTED && (
+        <div className="absolute bottom-8 left-1/2 transform -translate-x-1/2 flex items-center gap-3 bg-gray-900/80 backdrop-blur-xl p-2.5 rounded-2xl border border-gray-800 shadow-2xl z-50">
+           <div className="flex items-center gap-2 px-2">
+              <Button variant="icon" size="icon" onClick={toggleMute} active={!isMuted} className={isMuted ? 'bg-red-500/10 text-red-500 border-red-500/20' : ''}>
+                  {isMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
+              </Button>
+              <Button variant="icon" size="icon" onClick={toggleVideo} active={!isVideoOff} className={isVideoOff ? 'bg-red-500/10 text-red-500 border-red-500/20' : ''}>
+                  {isVideoOff ? <VideoOff className="w-5 h-5" /> : <Video className="w-5 h-5" />}
+              </Button>
+           </div>
 
-         <div className="w-px h-8 bg-gray-700/50"></div>
+           <div className="w-px h-8 bg-gray-700/50"></div>
 
-         <div className="flex items-center gap-2 px-2">
-            <Button variant="icon" size="icon" onClick={toggleHand} active={isHandRaised} className={isHandRaised ? 'bg-yellow-500/20 text-yellow-500 border-yellow-500/20' : ''} title="Raise Hand">
-               <Hand className="w-5 h-5" />
-            </Button>
-            
-            <Button variant="icon" size="icon" onClick={() => setShowAiPanel(!showAiPanel)} active={showAiPanel} className={showAiPanel ? 'bg-brand-600 text-white border-brand-500' : 'text-brand-400'} title="AI Assistant">
-               <Sparkles className="w-5 h-5" />
-            </Button>
+           <div className="flex items-center gap-2 px-2">
+              <Button variant="icon" size="icon" onClick={toggleHand} active={isHandRaised} className={isHandRaised ? 'bg-yellow-500/20 text-yellow-500 border-yellow-500/20' : ''} title="Raise Hand">
+                 <Hand className="w-5 h-5" />
+              </Button>
+              
+              <Button variant="icon" size="icon" onClick={() => setShowAiPanel(!showAiPanel)} active={showAiPanel} className={showAiPanel ? 'bg-brand-600 text-white border-brand-500' : 'text-brand-400'} title="AI Assistant">
+                 <Sparkles className="w-5 h-5" />
+              </Button>
 
-            {amIHost && status === CallStatus.CONNECTED && (
-                <Button variant="icon" size="icon" onClick={kickPeer} className="text-red-400 hover:text-red-300 hover:bg-red-900/20" title="Kick Participant (Admin)">
-                   <ShieldAlert className="w-5 h-5" />
-                </Button>
-            )}
-         </div>
+              {amIHost && status === CallStatus.CONNECTED && (
+                  <Button variant="icon" size="icon" onClick={kickPeer} className="text-red-400 hover:text-red-300 hover:bg-red-900/20" title="Kick Participant (Admin)">
+                     <ShieldAlert className="w-5 h-5" />
+                  </Button>
+              )}
+           </div>
 
-         <div className="w-px h-8 bg-gray-700/50"></div>
+           <div className="w-px h-8 bg-gray-700/50"></div>
 
-         <Button variant="danger" size="icon" onClick={endCall} className="rounded-xl w-14 h-12">
-            <PhoneOff className="w-6 h-6" />
-         </Button>
-      </div>
+           <Button variant="danger" size="icon" onClick={() => endCall(true)} className="rounded-xl w-14 h-12">
+              <PhoneOff className="w-6 h-6" />
+           </Button>
+        </div>
+      )}
 
       {/* Side Panel */}
       <AiAssistant isOpen={showAiPanel} onClose={() => setShowAiPanel(false)} />
