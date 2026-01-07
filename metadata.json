@@ -1,0 +1,8 @@
+{
+  "name": "Connectable",
+  "description": "Professional video conferencing with built-in AI assistance.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
