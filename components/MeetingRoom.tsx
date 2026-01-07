@@ -45,9 +45,8 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({ roomId: targetRoomId }
         audio: true
       });
       setLocalStream(stream);
-      if (localVideoRef.current) {
-        localVideoRef.current.srcObject = stream;
-      }
+      // Note: We cannot set srcObject here reliably because the video element might not be in the DOM yet.
+      // We rely on the useEffects below to bind the stream to the video element.
       return stream;
     } catch (err) {
       console.error("Failed to get media", err);
@@ -68,6 +67,20 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({ roomId: targetRoomId }
       localStream.getTracks().forEach(track => track.stop());
     }
   };
+
+  // Effect to attach LOCAL stream to video element when it becomes available
+  useEffect(() => {
+    if (localVideoRef.current && localStream) {
+      localVideoRef.current.srcObject = localStream;
+    }
+  }, [localStream, status]); // Run when stream changes OR when status changes (video element mounts)
+
+  // Effect to attach REMOTE stream to video element when it becomes available
+  useEffect(() => {
+    if (remoteVideoRef.current && remoteStream) {
+      remoteVideoRef.current.srcObject = remoteStream;
+    }
+  }, [remoteStream, status]);
 
   useEffect(() => {
     const initPeer = async () => {
@@ -91,7 +104,6 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({ roomId: targetRoomId }
           call.on('stream', (remoteStream) => {
             setRemoteStream(remoteStream);
             setStatus(CallStatus.CONNECTED);
-            if (remoteVideoRef.current) remoteVideoRef.current.srcObject = remoteStream;
           });
 
           call.on('close', () => {
@@ -119,7 +131,6 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({ roomId: targetRoomId }
         setStatus(CallStatus.CONNECTED);
         call.on('stream', (remoteStream) => {
             setRemoteStream(remoteStream);
-            if (remoteVideoRef.current) remoteVideoRef.current.srcObject = remoteStream;
         });
         call.on('close', () => {
             setEndReason("The participant left the meeting.");
@@ -227,7 +238,8 @@ export const MeetingRoom: React.FC<MeetingRoomProps> = ({ roomId: targetRoomId }
     
     return (
       <div className={`relative overflow-hidden rounded-2xl bg-gray-900 border border-gray-800 shadow-2xl transition-all duration-300 group
-        ${isLocal ? 'h-48 w-48 md:h-64 md:w-full object-cover' : 'flex-1 w-full h-full'}`}
+        ${isLocal ? 'order-2 md:order-1' : 'order-1 md:order-2'}
+        w-full h-full min-h-[200px] object-cover`}
       >
         <video 
           ref={ref} 
